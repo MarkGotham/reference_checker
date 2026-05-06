@@ -162,15 +162,17 @@ def build_report(results: list[dict], out_path: Path, amber: float, red: float) 
     story.append(Spacer(1, 0.4*cm))
 
     #  Incomplete-entry summary block 
-    incomplete = [r for r in results if r.get("skipped")]
+    incomplete = [r for r in results if r.get("missing_fields")]
     if incomplete:
-        lines = ["<b>Entries skipped — missing required fields:</b>"]
+        lines = ["<b>Entries with missing required fields:</b>"]
         for r in incomplete:
             key = escape(r["entry"].get("ID", "?"))
             missing = r.get("missing_fields", [])
             missing_str = escape(", ".join(missing)) if missing else "unknown"
-            lines.append(f"  • {key}: missing {missing_str}")
-        story.append(para("<br/>".join(lines), warn))
+            skipped_note = " [API skipped]" if r.get("skipped") else ""
+            lines.append(f"  • {key}: missing {missing_str}{skipped_note}")
+
+        story.append(Paragraph("<br/>".join(lines), warn))
         story.append(Spacer(1, 0.3*cm))
 
     # Summary counts (compute status once per result to avoid repeated calls).
