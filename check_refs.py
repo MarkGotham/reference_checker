@@ -35,7 +35,7 @@ import aiohttp
 import bibtexparser
 from tqdm import tqdm
 
-from checkers import ENTRY_TYPE_FIELDS, UNIVERSAL_FIELDS, log_incomplete_summary, score_entry
+from checkers import ENTRY_TYPE_FIELDS, UNIVERSAL_FIELDS, log_incomplete_summary, score_entry, check_required_fields
 from report import build_report
 
 logger = logging.getLogger(__name__)
@@ -62,7 +62,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--concurrency", type=int,   default=5,
                    help="Max simultaneous API requests (default 5)")
     p.add_argument("--required",    type=str,   nargs="*",
-                   default=[""],
+                   default=[],
                    metavar="FIELD",
                    help=(
                        "Extra fields to require on top of the automatic set "
@@ -134,17 +134,21 @@ async def main() -> None:
             except Exception as exc:
                 key = entry.get("ID", "<unknown>")
                 logger.warning("Unhandled error scoring %s: %s", key, exc)
+
+                # Calculate missing fields to ensure they are reported
+                missing_fields = check_required_fields(entry, extra=extra)
+
                 result = {
-                    "entry":          entry,
-                    "score":          None,
-                    "components":     {},
-                    "best_hit":       None,
-                    "searched":       False,
-                    "not_found":      True,
-                    "short_circuit":  False,
-                    "missing_fields": [],
-                    "skipped":        False,
-                    "error":          str(exc),
+                    "entry": entry,
+                    "score": None,
+                    "components": {},
+                    "best_hit": None,
+                    "searched": False,
+                    "not_found": True,
+                    "short_circuit": False,
+                    "missing_fields": missing_fields,
+                    "skipped": False,
+                    "error": str(exc),
                 }
         results.append(result)
         bar.update(1)

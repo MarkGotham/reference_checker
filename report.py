@@ -265,6 +265,8 @@ def build_report(results: list[dict], out_path: Path, amber: float, red: float) 
 
         # Skipped entries: compact notice, no comparison grid
         if skipped:
+            # missing = r.get("missing_fields", [])
+            # Join the list into a string. Use "unknown" if the list is empty.
             missing_str = ", ".join(missing) if missing else "unknown"
             notice = Table(
                 [[para(

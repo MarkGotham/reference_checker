@@ -72,12 +72,12 @@ DBLP_SHORTCIRCUIT_THRESHOLD = 0.80   # DBLP hit: skip OpenAlex + Semantic Schola
 # Checked for every entry regardless of type. TODO right? No legit cases can omit these?
 UNIVERSAL_FIELDS: tuple[str, ...] = ("title", "author", "year")
 
-# Checked only when the entry's ENTRY_TYPE matches the key. TODO manually made, check all
+# Checked only when the entry's entry type matches the key. TODO manually made, check all
 ENTRY_TYPE_FIELDS: dict[str, tuple[str, ...]] = {
     "book": ("isbn", "publisher"),
-    "article": ("journal",),
-    "inproceedings": ("booktitle",),
-    "incollection": ("booktitle",),
+    "article": ("journal", "doi"),
+    "inproceedings": ("booktitle", "doi"),
+    "incollection": ("booktitle", "doi"),
     "phdthesis": ("school",),
 }
 
@@ -102,10 +102,10 @@ def check_required_fields(
     after the progress bar is closed otherwise the warning lines will print
     mid-bar and corrupt the output.
     """
-    entry_type = entry.get("ENTRY_TYPE", "").lower()
+    entry_type = entry.get("ENTRYTYPE", "").lower()
     type_fields = ENTRY_TYPE_FIELDS.get(entry_type, ())
     required = (*UNIVERSAL_FIELDS, *type_fields, *extra)
-    return [f for f in required if not entry.get(f, "").strip()]
+    return [f for f in required if not str(entry.get(f, "")).strip()]
 
 
 def log_incomplete_summary(results: list[dict]) -> None:
@@ -488,7 +488,7 @@ async def score_entry(
     if missing and skip_if_incomplete:
         return {
             "entry": entry,
-            "score": 0.0,
+            "score": None,
             "components": {},
             "best_hit": None,
             "searched": False,  # API calls were not made
