@@ -69,25 +69,48 @@ DBLP_SHORTCIRCUIT_THRESHOLD = 0.80   # DBLP hit: skip OpenAlex + Semantic Schola
 
 # Required-field pre-check 
 
-DEFAULT_REQUIRED_FIELDS = ("title", "author", "year", "doi")
+# Checked for every entry regardless of type. TODO right? No legit cases can omit these?
+UNIVERSAL_FIELDS: tuple[str, ...] = ("title", "author", "year")
+
+# Checked only when the entry's ENTRY_TYPE matches the key. TODO manually made, check all
+ENTRY_TYPE_FIELDS: dict[str, tuple[str, ...]] = {
+    "book": ("isbn", "publisher"),
+    "article": ("journal",),
+    "inproceedings": ("booktitle",),
+    "incollection": ("booktitle",),
+    "phdthesis": ("school",),
+}
 
 
 # -----------------------------------------------------------------------------
 
 def check_required_fields(
     entry: dict,
-    required: tuple[str, ...] = DEFAULT_REQUIRED_FIELDS,
+    extra: tuple[str, ...] = (),
 ) -> list[str]:
-    """Return a list of field names that are absent or blank in *entry*.
-
-    Silent — callers should log warnings after any progress bar completes,
-    using :func:`log_incomplete_summary`.
     """
+    Return a list of field names that are absent or blank in *entry*.
+
+    This function checks
+    the `UNIVERSAL_FIELDS` (title, author, year in every case),
+    the fields listed in `ENTRY_TYPE_FIELDS` for each given entry's type,
+    and any caller-supplied at the CLI's `--required` option.
+
+    This function collects missing field names.
+    It does not log or print anything.
+    Call `log_incomplete_summary` to report problems, and do so
+    after the progress bar is closed otherwise the warning lines will print
+    mid-bar and corrupt the output.
+    """
+    entry_type = entry.get("ENTRY_TYPE", "").lower()
+    type_fields = ENTRY_TYPE_FIELDS.get(entry_type, ())
+    required = (*UNIVERSAL_FIELDS, *type_fields, *extra)
     return [f for f in required if not entry.get(f, "").strip()]
 
 
 def log_incomplete_summary(results: list[dict]) -> None:
-    """Log a grouped summary of all incomplete entries.
+    """
+    Log a grouped summary of all incomplete entries.
 
     Call this *after* the processing loop so warnings don't interleave with
     progress output.  Does nothing if every entry is complete.
@@ -115,8 +138,8 @@ def clean(s: Optional[str]) -> str:
     """
     if not s:
         return ""
-    s = re.sub(r"\{([^}]*)\}", r"\1", s)
-    s = re.sub(r"\\[a-zA-Z]+\s*", "", s)   # remove commands
+    s = re.sub(r"\{([^}]*)}", r"\1", s)
+    s = re.sub(r"\\[a-zA-Z]+\s*", "", s)
     return " ".join(s.split()).lower()
 
 
@@ -210,7 +233,7 @@ async def query_crossref(session: aiohttp.ClientSession, entry: dict) -> Optiona
                     f"{a.get('family', '')} {a.get('given', '')}".strip()
                     for a in msg.get("author", [])
                 ],
-                "year":  str(year_raw) if year_raw is not None else "",
+                "year": str(year_raw) if year_raw is not None else "",
                 "venue": clean(msg.get("container-title", [""])[0]),
             }
 
@@ -221,8 +244,8 @@ async def query_crossref(session: aiohttp.ClientSession, entry: dict) -> Optiona
     data = await get_json(session, "https://api.crossref.org/works", {
         "query.title":  clean(title),
         "query.author": clean(entry.get("author", "")),
-        "rows":         MAX_HITS_PER_QUERY,
-        "select":       "DOI,title,author,published-print,published-online,container-title",
+        "rows": MAX_HITS_PER_QUERY,
+        "select": "DOI,title,author,published-print,published-online,container-title",
     })
     if not data:
         return None
@@ -236,14 +259,14 @@ async def query_crossref(session: aiohttp.ClientSession, entry: dict) -> Optiona
     )
     year_raw = date_parts[0] if date_parts else None
     return {
-        "source":    "CrossRef (search)",
+        "source": "CrossRef (search)",
         "doi_exact": 0.0,
-        "title":     " ".join(msg.get("title", [])),
-        "authors":   [
+        "title": " ".join(msg.get("title", [])),
+        "authors": [
             f"{a.get('family', '')} {a.get('given', '')}".strip()
             for a in msg.get("author", [])
         ],
-        "year":  str(year_raw) if year_raw is not None else "",
+        "year": str(year_raw) if year_raw is not None else "",
         "venue": clean(msg.get("container-title", [""])[0]),
     }
 
@@ -273,15 +296,15 @@ async def query_dblp(session: aiohttp.ClientSession, entry: dict) -> Optional[di
     query = " ".join(query_parts)
 
     data = await get_json(session, "https://dblp.org/search/publ/api", {
-        "q":      query,
+        "q": query,
         "format": "json",
-        "h":      MAX_HITS_PER_QUERY,
-        "c":      0,
+        "h": MAX_HITS_PER_QUERY,
+        "c": 0,
     })
     if not data:
         return None
 
-    hits     = (data.get("result") or {}).get("hits") or {}
+    hits = (data.get("result") or {}).get("hits") or {}
     hit_list = hits.get("hit") or []
     if not hit_list:
         return None
@@ -304,24 +327,24 @@ async def query_dblp(session: aiohttp.ClientSession, entry: dict) -> Optional[di
     venue = info.get("venue") or info.get("journal") or info.get("booktitle") or ""
 
     return {
-        "source":    "DBLP",
+        "source": "DBLP",
         "doi_exact": 0.0,
-        "title":     info.get("title", ""),
-        "authors":   authors,
-        "year":      str(info.get("year", "")),
-        "venue":     clean(venue),
+        "title": info.get("title", ""),
+        "authors": authors,
+        "year": str(info.get("year", "")),
+        "venue": clean(venue),
     }
 
 
 async def query_openalex(session: aiohttp.ClientSession, entry: dict) -> Optional[dict]:
-    doi   = entry.get("doi", "").strip()
+    doi = entry.get("doi", "").strip()
     title = entry.get("title", "")
 
     params: dict = {"select": "title,authorships,publication_year,primary_location"}
     if doi:
         params["filter"] = f"doi:{doi}"
     elif title:
-        params["search"]   = clean(title)
+        params["search"] = clean(title)
         params["per-page"] = str(MAX_HITS_PER_QUERY)
     else:
         return None
@@ -332,24 +355,24 @@ async def query_openalex(session: aiohttp.ClientSession, entry: dict) -> Optiona
     results = data.get("results", [])
     if not results:
         return None
-    w       = results[0]
+    w = results[0]
     authors = [a["author"].get("display_name", "") for a in w.get("authorships", [])]
-    source  = ((w.get("primary_location") or {}).get("source") or {})
+    source = ((w.get("primary_location") or {}).get("source") or {})
     return {
-        "source":    "OpenAlex",
+        "source": "OpenAlex",
         "doi_exact": 0.0,
-        "title":     w.get("title", ""),
-        "authors":   authors,
-        "year":      str(w.get("publication_year", "")),
-        "venue":     clean(source.get("display_name", "")),
+        "title": w.get("title", ""),
+        "authors": authors,
+        "year": str(w.get("publication_year", "")),
+        "venue": clean(source.get("display_name", "")),
     }
 
 
 async def query_semantic_scholar(
     session: aiohttp.ClientSession, entry: dict
 ) -> Optional[dict]:
-    doi    = entry.get("doi", "").strip()
-    title  = entry.get("title", "")
+    doi = entry.get("doi", "").strip()
+    title = entry.get("title", "")
     fields = "title,authors,year,venue,externalIds"
 
     if doi:
@@ -360,12 +383,12 @@ async def query_semantic_scholar(
         )
         if data and "title" in data:
             return {
-                "source":    "Semantic Scholar (DOI)",
+                "source": "Semantic Scholar (DOI)",
                 "doi_exact": 0.0,
-                "title":     data.get("title", ""),
-                "authors":   [a.get("name", "") for a in data.get("authors", [])],
-                "year":      str(data.get("year", "")),
-                "venue":     clean(data.get("venue", "")),
+                "title": data.get("title", ""),
+                "authors": [a.get("name", "") for a in data.get("authors", [])],
+                "year": str(data.get("year", "")),
+                "venue": clean(data.get("venue", "")),
             }
 
     if not title:
@@ -382,12 +405,12 @@ async def query_semantic_scholar(
         return None
     p = items[0]
     return {
-        "source":    "Semantic Scholar (search)",
+        "source": "Semantic Scholar (search)",
         "doi_exact": 0.0,
-        "title":     p.get("title", ""),
-        "authors":   [a.get("name", "") for a in p.get("authors", [])],
-        "year":      str(p.get("year", "")),
-        "venue":     clean(p.get("venue", "")),
+        "title": p.get("title", ""),
+        "authors": [a.get("name", "") for a in p.get("authors", [])],
+        "year": str(p.get("year", "")),
+        "venue": clean(p.get("venue", "")),
     }
 
 
@@ -397,17 +420,17 @@ async def query_semantic_scholar(
 
 def compute_score(entry: dict, hit: dict) -> tuple[float, dict]:
     """Return (weighted_score, component_dict) for one API hit."""
-    bib_title   = entry.get("title", "")
+    bib_title = entry.get("title", "")
     bib_authors = entry.get("author", "")
-    bib_year    = entry.get("year", "")
-    bib_venue   = entry.get("journal") or entry.get("booktitle", "")
+    bib_year = entry.get("year", "")
+    bib_venue = entry.get("journal") or entry.get("booktitle", "")
 
     components = {
-        "doi_exact":  hit.get("doi_exact", 0.0),
-        "title_sim":  title_sim(bib_title,    hit.get("title", "")),
-        "author_sim": author_sim(bib_authors,  hit.get("authors", [])),
-        "year_match": year_match(bib_year,     hit.get("year")),
-        "journal_sim":journal_sim(bib_venue,   hit.get("venue", "")),
+        "doi_exact": hit.get("doi_exact", 0.0),
+        "title_sim": title_sim(bib_title, hit.get("title", "")),
+        "author_sim": author_sim(bib_authors, hit.get("authors", [])),
+        "year_match": year_match(bib_year, hit.get("year")),
+        "journal_sim": journal_sim(bib_venue, hit.get("venue", "")),
     }
     return weighted_score(components), components
 
@@ -430,7 +453,7 @@ def _pick_best(
 async def score_entry(
     session: aiohttp.ClientSession,
     entry: dict,
-    required: tuple[str, ...] = DEFAULT_REQUIRED_FIELDS,
+    extra: tuple[str, ...] = (),
     skip_if_incomplete: bool = False,
 ) -> dict:
     """Pre-check required fields, then query APIs in order.
@@ -438,41 +461,41 @@ async def score_entry(
     Parameters
     ----------
     session:
-        A shared :class:`aiohttp.ClientSession`.  Callers should create one
-        session per batch and pass it here so connection pools are reused.
+        A shared `aiohttp.ClientSession`.
+        Create one session per batch and pass it here so connection pools are reused.
     entry:
         Parsed .bib entry dict.
-    required:
-        Fields that must be present and non-blank.  Defaults to
-        ``DEFAULT_REQUIRED_FIELDS = ("title", "author", "year", "doi")``.
-        TODO ^^ this is a hacky first attempt that doesn't account for variable type (@book, ...)
+    extra:
+        Additional fields to require beyond the automatic universal and entry-type-conditional set.
+        Passed straight through to `check_required_fields`.
+        Typically populated from the CLI `--required` option (e.g. `("doi",)`).
     skip_if_incomplete:
         If *True* and any required fields are missing, skip all API calls and
-        return a result with ``searched=False`` immediately.  The missing field
-        list is recorded under ``"missing_fields"``.
+        return a result with `searched=False` immediately.
+        The missing field list is recorded under `missing_fields`.
         If *False* (default), warn but continue with whatever fields exist.
 
     Short-circuit chain (when API calls proceed):
-        1. CrossRef  → stop if DOI hit scores ≥ ``DOI_SHORTCIRCUIT_THRESHOLD``
-        2. DBLP      → stop if hit scores ≥ ``DBLP_SHORTCIRCUIT_THRESHOLD``
+        1. CrossRef  → stop if DOI hit scores ≥ `DOI_SHORTCIRCUIT_THRESHOLD`
+        2. DBLP      → stop if hit scores ≥ `DBLP_SHORTCIRCUIT_THRESHOLD`
         3. OpenAlex + Semantic Scholar in parallel (last resort)
 
     Note: short-circuiting trades a small chance of a higher score from a
     later API for reduced latency.  See module-level note.
     """
-    missing = check_required_fields(entry, required)
+    missing = check_required_fields(entry, extra)
 
     if missing and skip_if_incomplete:
         return {
-            "entry":          entry,
-            "score":          0.0,
-            "components":     {},
-            "best_hit":       None,
-            "searched":       False,   # API calls were not made
-            "not_found":      False,
-            "short_circuit":  False,
+            "entry": entry,
+            "score": 0.0,
+            "components": {},
+            "best_hit": None,
+            "searched": False,  # API calls were not made
+            "not_found": False,
+            "short_circuit": False,
             "missing_fields": missing,
-            "skipped":        True,
+            "skipped": True,
         }
 
     # Step 1: CrossRef (best DOI coverage) 
@@ -481,15 +504,15 @@ async def score_entry(
         score, components = compute_score(entry, crossref_hit)
         if crossref_hit.get("doi_exact") and score >= DOI_SHORTCIRCUIT_THRESHOLD:
             return {
-                "entry":          entry,
-                "score":          round(score, 3),
-                "components":     components,
-                "best_hit":       crossref_hit,
-                "searched":       True,
-                "not_found":      False,
-                "short_circuit":  True,
+                "entry": entry,
+                "score": round(score, 3),
+                "components": components,
+                "best_hit": crossref_hit,
+                "searched": True,
+                "not_found": False,
+                "short_circuit": True,
                 "missing_fields": missing,
-                "skipped":        False,
+                "skipped": False,
             }
 
     # Step 2: DBLP (curated CS metadata, good title matching)
@@ -498,15 +521,15 @@ async def score_entry(
         score, components = compute_score(entry, dblp_hit)
         if score >= DBLP_SHORTCIRCUIT_THRESHOLD:
             return {
-                "entry":          entry,
-                "score":          round(score, 3),
-                "components":     components,
-                "best_hit":       dblp_hit,
-                "searched":       True,
-                "not_found":      False,
-                "short_circuit":  True,
+                "entry": entry,
+                "score": round(score, 3),
+                "components": components,
+                "best_hit": dblp_hit,
+                "searched": True,
+                "not_found": False,
+                "short_circuit": True,
                 "missing_fields": missing,
-                "skipped":        False,
+                "skipped": False,
             }
 
     # Step 3: OpenAlex + Semantic Scholar in parallel (fallback)
@@ -520,13 +543,13 @@ async def score_entry(
     )
 
     return {
-        "entry":          entry,
-        "score":          round(best_score, 3) if best_hit else None,
-        "components":     best_components,
-        "best_hit":       best_hit,
-        "searched":       True,
-        "not_found":      best_hit is None,
-        "short_circuit":  False,
+        "entry": entry,
+        "score": round(best_score, 3) if best_hit else None,
+        "components": best_components,
+        "best_hit": best_hit,
+        "searched": True,
+        "not_found": best_hit is None,
+        "short_circuit": False,
         "missing_fields": missing,
-        "skipped":        False,
+        "skipped": False,
     }

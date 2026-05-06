@@ -11,11 +11,16 @@ Usage:
     python check_refs.py file_name.bib [options]
 
 Options:
-    --amber FLOAT           Score threshold below which a ref is flagged amber  (default 0.7)
-    --red   FLOAT           Score threshold below which a ref is flagged red     (default 0.4)
+    --amber FLOAT           Score threshold below which a ref is flagged amber (default 0.7)
+    --red   FLOAT           Score threshold below which a ref is flagged red (default 0.4)
     --out   PATH            Output PDF path  (default: <bibfile>_ref_qual_report.pdf)
     --concurrency INT       Max simultaneous API requests  (default: 5)
-    --required FIELD ...    Required fields to check  (default: title author year doi)
+    --required FIELD ...    Extra fields to require on top of the automatic set.
+                            For all cases: title, author, year.
+                            Depending on the entry type:
+                            @article requires `journal`, @book requires `isbn` and `publisher`
+                            etc.
+                            Default is none.
     --skip-incomplete       Skip API calls for entries with missing required fields
                             and flag them red in the report
 """
@@ -30,7 +35,7 @@ import aiohttp
 import bibtexparser
 from tqdm import tqdm
 
-from checkers import DEFAULT_REQUIRED_FIELDS, log_incomplete_summary, score_entry
+from checkers import ENTRY_TYPE_FIELDS, UNIVERSAL_FIELDS, log_incomplete_summary, score_entry
 from report import build_report
 
 logger = logging.getLogger(__name__)
@@ -56,14 +61,27 @@ def parse_args() -> argparse.Namespace:
                    help="Output PDF path  (default: <bibfile>_ref_qual_report.pdf)")
     p.add_argument("--concurrency", type=int,   default=5,
                    help="Max simultaneous API requests (default 5)")
-    p.add_argument("--required",    type=str,   nargs="+",
-                   default=list(DEFAULT_REQUIRED_FIELDS),
+    p.add_argument("--required",    type=str,   nargs="*",
+                   default=[""],
                    metavar="FIELD",
-                   help="Required fields to check  (default: title author year doi)")
+                   help=(
+                       "Extra fields to require on top of the automatic set "
+                       "(universal: %(universal)s; plus per type: %(per_type)s). "
+                       "Default: none."
+                       % {
+                           "universal": ", ".join(UNIVERSAL_FIELDS),
+                           "per_type":  ", ".join(
+                               f"@{t}: {', '.join(fs)}"
+                               for t, fs in ENTRY_TYPE_FIELDS.items()
+                           ),
+                       }
+                   ))
     p.add_argument("--skip-incomplete", action="store_true", default=False,
                    help="Skip API calls for incomplete entries and flag them red")
     return p.parse_args()
 
+
+# -----------------------------------------------------------------------------
 
 # Entry point
 
@@ -84,7 +102,7 @@ async def main() -> None:
         if args.out
         else bib_path.with_name(bib_path.stem + "_ref_qual_report.pdf")
     )
-    required = tuple(args.required)
+    extra = tuple(args.required or [])
 
     # Parse .bib
     with open(bib_path, encoding="utf-8") as fh:
@@ -92,8 +110,10 @@ async def main() -> None:
     bib_entries = library.entries
     print(f"Loaded {len(bib_entries)} references from {bib_path.name}")
     if args.skip_incomplete:
+        extra_note = f", plus extra: {', '.join(extra)}" if extra else ""
         print(
-            f"  Incomplete entries (missing: {', '.join(required)}) "
+            f"  Incomplete entries (always checked: {', '.join(UNIVERSAL_FIELDS)}; "
+            f"per-type conditional fields apply{extra_note}) "
             "will be flagged red without API calls."
         )
 
@@ -108,7 +128,7 @@ async def main() -> None:
                 result = await score_entry(
                     session,
                     entry,
-                    required=required,
+                    extra=extra,
                     skip_if_incomplete=args.skip_incomplete,
                 )
             except Exception as exc:
