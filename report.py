@@ -77,7 +77,7 @@ def status(
 
 
 def para(text, style) -> Paragraph:
-    """Wrap *text* in a ReportLab `Paragraph` obejct, escaping HTML special characters."""
+    """Wrap *text* in a ReportLab `Paragraph` object, escaping HTML special characters."""
     safe = escape(str(text)) if text else "—"
     return Paragraph(safe, style)
 
@@ -166,9 +166,10 @@ def build_report(results: list[dict], out_path: Path, amber: float, red: float) 
     if incomplete:
         lines = ["<b>Entries skipped — missing required fields:</b>"]
         for r in incomplete:
-            key     = escape(r["entry"].get("ID", "?"))
-            missing = escape(", ".join(r.get("missing_fields", [])))
-            lines.append(f"  • {key}: missing {missing}")
+            key = escape(r["entry"].get("ID", "?"))
+            missing = r.get("missing_fields", [])
+            missing_str = escape(", ".join(missing)) if missing else "unknown"
+            lines.append(f"  • {key}: missing {missing_str}")
         story.append(para("<br/>".join(lines), warn))
         story.append(Spacer(1, 0.3*cm))
 
@@ -262,9 +263,10 @@ def build_report(results: list[dict], out_path: Path, amber: float, red: float) 
 
         # Skipped entries: compact notice, no comparison grid
         if skipped:
+            missing_str = ", ".join(missing) if missing else "unknown"
             notice = Table(
                 [[para(
-                    f"Missing fields: {', '.join(missing)}  — API check skipped. "
+                    f"Missing fields: {missing_str}  — API check skipped. "
                     "Treat as FLAG until fields are supplied.",
                     warn,
                 )]],
@@ -326,6 +328,13 @@ def build_report(results: list[dict], out_path: Path, amber: float, red: float) 
             _row("Venue", e_venue, hit["venue"] if hit else None, "journal_sim"),
             _row("DOI", e_doi or "none", hit.get("source", "") if hit else None),
         ]
+        if missing:
+            missing_str = ", ".join(missing)
+            detail_data.append([
+                para("⚠ Missing", smallB),
+                para(missing_str, warn),
+                para("—", small),
+            ])
         col_w_detail = [text_w * 0.147, text_w * 0.441, text_w * 0.412]
         detail = Table(detail_data, colWidths=col_w_detail)
         detail.setStyle(TableStyle([
