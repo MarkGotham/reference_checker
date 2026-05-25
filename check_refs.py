@@ -23,11 +23,16 @@ Options:
                             Default is none.
     --skip-incomplete       Skip API calls for entries with missing required fields
                             and flag them red in the report
+    --main-tex PATH         Path to the main .tex file. When provided, any .bib entry
+                            whose key does not appear in a `\cite{}` call (including
+                            citep, citet, citealt, citeyear, etc.) is skipped
+                            entirely and listed to stdout.
 """
 
 import argparse
 import asyncio
 import logging
+import re
 import sys
 from pathlib import Path
 
@@ -41,6 +46,45 @@ from report import build_report
 logger = logging.getLogger(__name__)
 
 __author__ = "Mark Gotham"
+
+# -----------------------------------------------------------------------------
+
+# Cite-key extraction from a .tex file
+
+def extract_cited_keys(tex_path: Path) -> set[str]:
+    """
+    Return the set of all BibTeX keys cited anywhere in *tex_path*.
+
+    Matches all \cite variants including
+        \cite, \citep, \citet, \citealt, \citealp,
+        \citeauthor, \citeyear, \citenum, \Citep, \Citet, …
+    and handles multiple comma-separated keys inside a single command,
+    e.g. \citep{x, y, z}.
+
+    Only the mandatory cite key argument {here!} is parsed;
+    optional [here!] arguments are ignored
+    (e.g. page numbers in \\citep[p.~number]{cite_key}).
+    """
+    text = tex_path.read_text(encoding="utf-8")
+
+    # Match \cite<anything>{key1, key2, ...}
+    # The optional [...] before {...} is consumed but not captured.
+    cite_re = re.compile(
+        r"\\[Cc]ite\w*"          # \cite, \citep, \Citet, etc.
+        r"(?:\[[^\]]*\])?"        # optional [pre-note]
+        r"(?:\[[^\]]*\])?"        # optional [post-note]  (natbib allows two)
+        r"\{([^}]+)\}",           # mandatory {keys}
+        re.UNICODE,
+    )
+
+    keys: set[str] = set()
+    for m in cite_re.finditer(text):
+        for raw_key in m.group(1).split(","):
+            key = raw_key.strip()
+            if key:
+                keys.add(key)
+
+    return keys
 
 
 # -----------------------------------------------------------------------------
@@ -78,6 +122,13 @@ def parse_args() -> argparse.Namespace:
                    ))
     p.add_argument("--skip-incomplete", action="store_true", default=False,
                    help="Skip API calls for incomplete entries and flag them red")
+    p.add_argument("--main-tex",    type=str,   default=None,
+                   metavar="PATH",
+                   help=(
+                       "Path to the main .tex file. Bib entries whose keys are "
+                       "not cited in the tex file (via any \cite* command) are "
+                       "skipped and listed to stdout."
+                   ))
     return p.parse_args()
 
 
@@ -109,6 +160,29 @@ async def main() -> None:
         library = bibtexparser.load(fh)
     bib_entries = library.entries
     print(f"Loaded {len(bib_entries)} references from {bib_path.name}")
+
+    # --main-tex filtering
+    if args.main_tex:
+        tex_path = Path(args.main_tex)
+        if not tex_path.exists():
+            sys.exit(f"Tex file not found: {tex_path}")
+        cited_keys = extract_cited_keys(tex_path)
+        print(f"Found {len(cited_keys)} unique cited keys in {tex_path.name}")
+
+        uncited = [e["ID"] for e in bib_entries if e["ID"] not in cited_keys]
+        if uncited:
+            print(f"\n{len(uncited)} bib entr{'y' if len(uncited) == 1 else 'ies'} "
+                  f"not cited in {tex_path.name} (will be skipped):")
+            for key in uncited:
+                print(f"  {key}")
+            print()
+        else:
+            print("All bib entries are cited in the tex file.\n")
+
+        # Drop uncited entries from the work list
+        bib_entries = [e for e in bib_entries if e["ID"] in cited_keys]
+        print(f"{len(bib_entries)} entries remaining after filtering.\n")
+
     if args.skip_incomplete:
         extra_note = f", plus extra: {', '.join(extra)}" if extra else ""
         print(
