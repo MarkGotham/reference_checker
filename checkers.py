@@ -76,8 +76,8 @@ UNIVERSAL_FIELDS: tuple[str, ...] = ("title", "author", "year")
 ENTRY_TYPE_FIELDS: dict[str, tuple[str, ...]] = {
     "book": ("isbn", "publisher"),
     "article": ("journal", "doi"),
-    "inproceedings": ("booktitle", "doi"),
-    "incollection": ("booktitle", "doi"),
+    "inproceedings": ("booktitle", "doi"),  # TODO DOI first, if not ISBN
+    "incollection": ("booktitle", "doi"),  # TODO "
     "phdthesis": ("school",),
 }
 
