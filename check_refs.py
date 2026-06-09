@@ -10,6 +10,8 @@ Check on the quality of .bib files.
 Usage:
     python check_refs.py file_name.bib [options]
 
+Example:
+    python check_refs.py bib_file.bib --main-tex main.tex --skip-incomplete
 Options:
     --amber FLOAT           Score threshold below which a ref is flagged amber (default 0.7)
     --red   FLOAT           Score threshold below which a ref is flagged red (default 0.4)
@@ -55,15 +57,15 @@ def extract_cited_keys(tex_path: Path) -> set[str]:
     """
     Return the set of all BibTeX keys cited anywhere in *tex_path*.
 
-    Matches all \cite variants including
-        \cite, \citep, \citet, \citealt, \citealp,
-        \citeauthor, \citeyear, \citenum, \Citep, \Citet, …
+    Matches all `\cite` variants including `\cite` followed by
+    - nothing
+    - `a`, `p`, `t`, `alt`, `alp, `author`, `year`, `num`,
     and handles multiple comma-separated keys inside a single command,
-    e.g. \citep{x, y, z}.
+    e.g. `\citep{x, y, z}`.
 
     Only the mandatory cite key argument {here!} is parsed;
     optional [here!] arguments are ignored
-    (e.g. page numbers in \\citep[p.~number]{cite_key}).
+    (e.g. page numbers in `\citep[p.~number]{cite_key}`).
     """
     text = tex_path.read_text(encoding="utf-8")
 
@@ -126,7 +128,7 @@ def parse_args() -> argparse.Namespace:
                    metavar="PATH",
                    help=(
                        "Path to the main .tex file. Bib entries whose keys are "
-                       "not cited in the tex file (via any \cite* command) are "
+                       "not cited in the tex file (via any `\cite*` command) are "
                        "skipped and listed to stdout."
                    ))
     return p.parse_args()
