@@ -6,11 +6,11 @@ Returns a scored result dict for each .bib entry
 based on querying APIs
 (some/all of `CrossRef`, `DBLP`, `OpenAlex`, and `Semantic Scholar`).
 
-Score components (each 0–1, combined as a weighted average):
+Score components (each 0 to 1, combined as a weighted average):
 - `doi_exact`: DOI found and metadata matches
 - `title_sim`: fuzzy similarity match of title between that given and best API hit
 - `author_sim`: as for title
-- `year_match`: Year within ±1
+- `year_match`: year within 1 of the given year.
 - `journal_sim`: Venue (e.g., journal) name similarity
 
 Short-circuit chain:
@@ -67,17 +67,19 @@ MAX_HITS_PER_QUERY = 1
 DOI_SHORTCIRCUIT_THRESHOLD  = 0.85   # CrossRef DOI hit: skip all remaining APIs
 DBLP_SHORTCIRCUIT_THRESHOLD = 0.80   # DBLP hit: skip OpenAlex + Semantic Scholar
 
-# Required-field pre-check 
+# Required-field pre-check
 
-# Checked for every entry regardless of type. TODO right? No legit cases can omit these?
+# Checked for every entry regardless of type.
+# TODO confirm no legitimate entry of any kind can omit these.
 UNIVERSAL_FIELDS: tuple[str, ...] = ("title", "author", "year")
 
-# Checked only when the entry's entry type matches the key. TODO manually made, check all
+# Checked only when the entry's entry type matches the key.
+# TODO manually made, check all.
 ENTRY_TYPE_FIELDS: dict[str, tuple[str, ...]] = {
     "book": ("isbn", "publisher"),
     "article": ("journal", "doi"),
-    "inproceedings": ("booktitle", "doi"),  # TODO DOI first, if not ISBN
-    "incollection": ("booktitle", "doi"),  # TODO "
+    "inproceedings": ("booktitle", "doi"),  # TODO DOI first, if not ISBN.
+    "incollection": ("booktitle", "doi"),  # TODO as above.
     "phdthesis": ("school",),
 }
 
@@ -98,9 +100,19 @@ def check_required_fields(
 
     This function collects missing field names.
     It does not log or print anything.
-    Call `log_incomplete_summary` to report problems, and do so
-    after the progress bar is closed otherwise the warning lines will print
-    mid-bar and corrupt the output.
+    Call `log_incomplete_summary` to report problems.
+    Do so after the progress bar is closed, otherwise the warning lines
+    will print mid-bar and corrupt the output.
+
+    Examples
+    --------
+
+    >>> check_required_fields({"ENTRYTYPE": "article", "title": "T", "author": "A", "year": "2020"})
+    ['journal', 'doi']
+    >>> check_required_fields({"ENTRYTYPE": "book", "title": "T"})
+    ['author', 'year', 'isbn', 'publisher']
+    >>> check_required_fields({"ENTRYTYPE": "misc", "title": "T", "author": "A", "year": "2020"})
+    []
     """
     entry_type = entry.get("ENTRYTYPE", "").lower()
     type_fields = ENTRY_TYPE_FIELDS.get(entry_type, ())
@@ -120,10 +132,10 @@ def log_incomplete_summary(results: list[dict]) -> None:
         return
     logger.warning("INCOMPLETE ENTRIES (%d of %d)", len(incomplete), len(results))
     for r in incomplete:
-        key     = r["entry"].get("ID", "<unknown>")
+        key = r["entry"].get("ID", "<unknown>")
         missing = ", ".join(r["missing_fields"])
         skipped = "  [API skipped]" if r.get("skipped") else ""
-        logger.warning("  • %s: missing %s%s", key, missing, skipped)
+        logger.warning("  - %s: missing %s%s", key, missing, skipped)
 
 
 # -----------------------------------------------------------------------------
@@ -133,27 +145,90 @@ def log_incomplete_summary(results: list[dict]) -> None:
 def clean(s: Optional[str]) -> str:
     """
     Strip LaTeX markup and normalise whitespace by removing:
-    1. braces {}
-    2. commands (e.g., \textbf)
+    1. commands (e.g., \\textbf)
+    2. braces {}
+
+    Commands are stripped before braces, not after.
+    Stripping braces first would turn `\\textbf{Statistics}` into
+    `\\textbfStatistics`, and the command regex would then greedily
+    consume the whole thing, including the word `Statistics`, as if
+    it were all one command name.
+
+    Examples
+    --------
+
+    >>> clean(r"{Robust} \\textbf{Statistics}")
+    'robust statistics'
+    >>> clean("  Multiple   Spaces  ")
+    'multiple spaces'
+    >>> clean(None)
+    ''
+    >>> clean("")
+    ''
     """
     if not s:
         return ""
-    s = re.sub(r"\{([^}]*)}", r"\1", s)
+
     s = re.sub(r"\\[a-zA-Z]+\s*", "", s)
+    s = re.sub(r"\{([^}]*)}", r"\1", s)
+
     return " ".join(s.split()).lower()
 
 
 def title_sim(a: str, b: str) -> float:
-    """Compare bib file's 'title' field against API data."""
-    return fuzz.token_sort_ratio(clean(a), clean(b)) / 100
+    """
+    Compare bib file's 'title' field against API data.
+
+    A blank title is a red flag:
+    there is nothing to compare, so it is equivalent to the field being absent.
+    This always returns 0.0 without calling the fuzzy matcher.
+    (Otherwise the calculation is `fuzz.token_sort_ratio("", "")` == 100,
+    which would let two missing titles score as a perfect match.)
+
+    Examples
+    --------
+
+    >>> title_sim("Deep Learning", "Deep Learning")
+    1.0
+    >>> round(title_sim("Deep Learning", "Shallow Learning"), 2)
+    0.55
+    >>> title_sim("", "Deep Learning")
+    0.0
+    >>> title_sim("", "")
+    0.0
+    """
+    a, b = clean(a), clean(b)
+    if not a or not b:
+        return 0.0
+    return fuzz.token_sort_ratio(a, b) / 100
 
 
 def _normalise_author_name(name: str) -> str:
     """Normalise an author name to 'surname + initials' form.
 
-    Handles both BibTeX conventions ("Family, Given" and "Given Family")
-    and reduces all given names to single-letter initials, so that
-    full and abbreviated forms compare equally.
+    Handles three conventions without a comma:
+    - "Family, Given" (with comma to disambiguate): e.g. "Smith, John".
+    - "Given Family": e.g. "John Smith".
+    - "Family Initial": e.g. "Smith J.", (common in citation exports).
+
+    We distinguish "Given Family" and "Family Initial"
+    when there is no comma to disambiguate
+    by looking at the last token:
+    if it is a single letter (optionally followed by a period),
+    it cannot be a full surname,
+    so it is read as a trailing initial and the first token is the surname.
+
+    This is a heuristic, though are there any a genuine one-letter surnames?
+    If it exists, it's certainly extremely rare
+    and we have less exacting parts of this code base than that ;)
+
+    Finally, DBLP appends a disambiguation number to a name used more than once
+    ("Given Family 0001"),
+    so a trailing all-digit token is stripped before parsing
+    to prevent it being read as a surname.
+
+    Examples
+    --------
 
     >>> _normalise_author_name("John Smith")
     'smith j'
@@ -167,24 +242,63 @@ def _normalise_author_name(name: str) -> str:
     'tolkien j r r'
     >>> _normalise_author_name("Smith")
     'smith'
+    >>> _normalise_author_name("Michael Jordan 0001")
+    'jordan m'
     """
     name = clean(name)
     if not name:
         return ""
 
-    if "," in name:                       # "Family, Given"
+    name = re.sub(r"\s+\d+$", "", name)
+
+    if "," in name:
         surname, given = (p.strip() for p in name.split(",", 1))
-    else:                                  # "Given Family"
+    else:
         tokens = name.split()
         if len(tokens) == 1:
             return tokens[0]
-        surname = tokens[-1]
-        given = " ".join(tokens[:-1])
+        last = tokens[-1].rstrip(".")
+        if len(last) == 1:
+            surname, given = tokens[0], " ".join(tokens[1:])
+        else:
+            surname, given = tokens[-1], " ".join(tokens[:-1])
 
-    # Reduce every given-name token to its first letter.
     given_tokens = re.split(r"[\s.]+", given)
     initials = " ".join(t[0] for t in given_tokens if t)
     return f"{surname} {initials}".strip()
+
+
+def _token_lcs_ratio(a: str, b: str) -> float:
+    """Longest Common Subsequence ratio on *tokens*.
+
+    Unlike character-level fuzzy matching, a coincidental single-character
+    overlap (e.g. the ``j`` in ``smith j`` vs ``jones j``) does not inflate
+    the score, only full token matches count.
+
+    Examples
+    --------
+
+    >>> _token_lcs_ratio("smith j", "smith j")
+    1.0
+    >>> _token_lcs_ratio("smith j", "jones b")
+    0.0
+    >>> round(_token_lcs_ratio("smith j", "smith k"), 2)
+    0.5
+    >>> round(_token_lcs_ratio("tolkien j r r", "tolkien j"), 2)
+    0.5
+    """
+    ta, tb = a.split(), b.split()
+    if not ta or not tb:
+        return 0.0
+    m, n = len(ta), len(tb)
+    dp = [[0] * (n + 1) for _ in range(m + 1)]
+    for i in range(1, m + 1):
+        for j in range(1, n + 1):
+            if ta[i - 1] == tb[j - 1]:
+                dp[i][j] = dp[i - 1][j - 1] + 1
+            else:
+                dp[i][j] = max(dp[i - 1][j], dp[i][j - 1])
+    return dp[m][n] / max(m, n)
 
 
 def author_sim(bib_authors: str, api_authors: list[str]) -> float:
@@ -192,11 +306,18 @@ def author_sim(bib_authors: str, api_authors: list[str]) -> float:
 
     Names are normalised to 'surname + initials' (see
     ``_normalise_author_name``) and then compared **position-wise**:
-    each author slot is scored independently with :func:`fuzz.ratio`
-    and the per-slot scores are averaged.  Author order matters —
-    the same names in a different order will score poorly.
+    each author slot is scored with :func:`_token_lcs_ratio` and the
+    per-slot scores are averaged.
+    Author order matters, the same names in a different order will
+    score 0.0.
 
-    Full name and first-name-initial forms are equivalent:
+    Both ``" and "`` and ``";"`` are treated as author separators,
+    covering the two common BibTeX conventions.
+
+    Full name and first-name-initial forms are equivalent::
+
+    Examples
+    --------
 
     >>> author_sim("Smith, John", ["John Smith"])
     1.0
@@ -205,30 +326,35 @@ def author_sim(bib_authors: str, api_authors: list[str]) -> float:
     >>> author_sim("Smith, John", ["J. Smith"])
     1.0
 
-    Multiple authors in the same order:
+    Multiple authors in the same order::
 
-    >>> author_sim("Smith, John and Jones, Barbara", ["John Smith", "Barbara Jones"])
+    >>> author_sim("Smith, John and Jones, Bob", ["John Smith", "Bob Jones"])
     1.0
 
-    Wrong order is a fail, not a silent 1.0:
+    Semicolon-separated authors (non-standard but common in practice)::
 
-    >>> round(author_sim("Smith, J. and Jones, B.", ["Barbara Jones", "John Smith"]), 2)
-    0.29
+    >>> author_sim("Smith, J.; Jones, B.", ["Smith, J.", "Jones, B."])
+    1.0
 
-    This is intentional as almost the right unordered set of authors is a common hallucinaton error. 
-    
-    Completely different authors are an obvious fail:
+    Wrong order is a fail::
 
-    >>> round(author_sim("Smith, John", ["Jones, Barbara"]), 2)
-    0.29
+    >>> author_sim("Smith, J. and Jones, B.", ["Bob Jones", "John Smith"])
+    0.0
 
-    # TODO may consider a harder cutoff in future, clamping sub-threshold per-slot scores to 0.0:
-    # slot = fuzz.ratio(bib_norm[i], api_norm[i]) / 100
-    # scores.append(slot if slot > 0.8 else 0.0)
+    Completely different authors::
+
+    >>> author_sim("Smith, John", ["Jones, Bob"])
+    0.0
+
+    Same surname, different initial (partial match)::
+
+    >>> round(author_sim("Smith, John", ["Smith, Bob"]), 2)
+    0.5
+
     """
     if not bib_authors or not api_authors:
         return 0.0
-    bib_list = re.split(r"\s+and\s+", bib_authors, flags=re.IGNORECASE)
+    bib_list = re.split(r"\s+and\s+|;", bib_authors, flags=re.IGNORECASE)
     bib_norm = [_normalise_author_name(a) for a in bib_list]
     api_norm = [_normalise_author_name(a) for a in api_authors]
 
@@ -236,14 +362,30 @@ def author_sim(bib_authors: str, api_authors: list[str]) -> float:
     scores = []
     for i in range(max_len):
         if i < len(bib_norm) and i < len(api_norm):
-            scores.append(fuzz.ratio(bib_norm[i], api_norm[i]) / 100)
+            scores.append(_token_lcs_ratio(bib_norm[i], api_norm[i]))
         else:
             scores.append(0.0)  # missing or extra author
     return sum(scores) / len(scores)
 
 
 def year_match(bib_year: str, api_year) -> float:
-    """Compare years (max 1 year apart, nall or nothing)."""
+    """
+    Compare years: all or nothing, matching if at most 1 year apart.
+
+    Examples
+    --------
+
+    >>> year_match("2020", "2020")
+    1.0
+    >>> year_match("2020", "2021")
+    1.0
+    >>> year_match("2020", "2022")
+    0.0
+    >>> year_match("2020", None)
+    0.0
+    >>> year_match("", "2020")
+    0.0
+    """
     try:
         return 1.0 if abs(int(bib_year) - int(api_year)) <= 1 else 0.0
     except (TypeError, ValueError):
@@ -254,12 +396,39 @@ def journal_sim(bib_venue: str, api_venue: str) -> float:
     """
     Compare venue titles.
     Both sides cleaned so comparisons are consistent regardless of source.
+
+    Examples
+    --------
+
+    >>> round(journal_sim("Journal of Machine Learning Research", "J. Mach. Learn. Res."), 2)
+    0.57
+    >>> journal_sim("Nature", "Nature")
+    1.0
+    >>> journal_sim("", "Nature")
+    0.0
     """
     return fuzz.token_sort_ratio(clean(bib_venue), clean(api_venue)) / 100
 
 
 def weighted_score(components: dict) -> float:
-    """Compute weighted score."""
+    """
+    Compute a weighted sum of score components using `WEIGHTS`.
+
+    Any key in *components* that is not in `WEIGHTS` is ignored,
+    so callers can pass extra bookkeeping keys
+    (e.g. `title_missing`)
+    alongside the scored ones.
+
+    Examples
+    --------
+
+    >>> weighted_score({"doi_exact": 1.0, "title_sim": 1.0, "author_sim": 1.0, "year_match": 1.0, "journal_sim": 1.0})
+    1.0
+    >>> weighted_score({"doi_exact": 0.0, "title_sim": 0.0, "author_sim": 0.0, "year_match": 0.0, "journal_sim": 0.0})
+    0.0
+    >>> weighted_score({"doi_exact": 1.0, "title_sim": 0.0, "author_sim": 0.0, "year_match": 0.0, "journal_sim": 0.0})
+    0.4
+    """
     return sum(WEIGHTS[k] * v for k, v in components.items() if k in WEIGHTS)
 
 
@@ -268,7 +437,15 @@ async def get_json(
     url: str,
     params: dict,
 ) -> Optional[dict]:
-    """`GET` with simple retry on 429, honouring the `Retry-After` header."""
+    """
+    `GET` with simple retry, honouring the `Retry-After` header on 429.
+
+    A 404 (or other non-429 4xx) is a client-side
+    "not found" or "bad request"
+    and will not change on retry, so it returns `None`
+    immediately instead of burning the remaining attempts.
+    5xx responses and network errors are treated as transient and retried.
+    """
     for attempt in range(3):
         try:
             async with session.get(
@@ -277,6 +454,8 @@ async def get_json(
                 headers=HEADERS,
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as r:
+                if r.status == 200:
+                    return await r.json(content_type=None)
                 if r.status == 429:
                     retry_after = int(
                         r.headers.get("Retry-After", RETRY_AFTER_DEFAULT * (attempt + 1))
@@ -284,8 +463,9 @@ async def get_json(
                     logger.debug("429 from %s; waiting %ds", url, retry_after)
                     await asyncio.sleep(retry_after)
                     continue
-                if r.status == 200:
-                    return await r.json(content_type=None)
+                if 400 <= r.status < 500:
+                    logger.debug("%d from %s; not retrying", r.status, url)
+                    return None
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             logger.debug("Request error on attempt %d for %s: %s", attempt, url, exc)
             await asyncio.sleep(2)
@@ -297,7 +477,13 @@ async def get_json(
 # Per-API query functions
 
 async def query_crossref(session: aiohttp.ClientSession, entry: dict) -> Optional[dict]:
-    """Returns best-match metadata dict or None."""
+    """
+    Query CrossRef by DOI first, falling back to a title/author search.
+
+    Returns best-match metadata dict or None.
+    Author names are always returned as "Family Given" for consistency
+    between the DOI and title-search branches.
+    """
     doi = entry.get("doi", "").strip()
 
     # 1. DOI direct lookup (highest confidence)
@@ -311,10 +497,10 @@ async def query_crossref(session: aiohttp.ClientSession, entry: dict) -> Optiona
             )
             year_raw = date_parts[0] if date_parts else None
             return {
-                "source":    "CrossRef (DOI)",
+                "source": "CrossRef (DOI)",
                 "doi_exact": 1.0,
-                "title":     " ".join(msg.get("title", [])),
-                "authors":   [
+                "title": " ".join(msg.get("title", [])),
+                "authors": [
                     f"{a.get('family', '')} {a.get('given', '')}".strip()
                     for a in msg.get("author", [])
                 ],
@@ -504,7 +690,15 @@ async def query_semantic_scholar(
 # Scoring
 
 def compute_score(entry: dict, hit: dict) -> tuple[float, dict]:
-    """Return (weighted_score, component_dict) for one API hit."""
+    """
+    Return (weighted_score, component_dict) for one API hit.
+
+    A blank bib title is recorded as `title_missing`
+    since the biggest component after `doi_exact`
+    could not be checked for this entry.
+    (The `title_sim` already handles this safely on its own,
+    so this is purely a visibility flag for callers.)
+    """
     bib_title = entry.get("title", "")
     bib_authors = entry.get("author", "")
     bib_year = entry.get("year", "")
@@ -516,20 +710,35 @@ def compute_score(entry: dict, hit: dict) -> tuple[float, dict]:
         "author_sim": author_sim(bib_authors, hit.get("authors", [])),
         "year_match": year_match(bib_year, hit.get("year")),
         "journal_sim": journal_sim(bib_venue, hit.get("venue", "")),
+        "title_missing": not bib_title.strip(),
     }
     return weighted_score(components), components
 
 
-def _pick_best(
-    entry: dict,
-    hits: list[Optional[dict]],
+def _best_of(
+    scored: list[tuple[Optional[dict], float, dict]],
 ) -> tuple[float, Optional[dict], dict]:
-    """Return (best_score, best_hit, best_components) across all hits."""
+    """
+    Return the best (score, hit, components) triple,
+    skipping entries where the hit is `None`.
+
+    Takes already-scored triples rather than raw hits,
+    so a hit that was scored earlier
+    (e.g. for a short-circuit check)
+    does not need to be scored again here.
+
+    Examples
+    --------
+
+    >>> _best_of([(None, 0.0, {}), ({"id": 1}, 0.4, {"a": 1}), ({"id": 2}, 0.9, {"b": 2})])
+    (0.9, {'id': 2}, {'b': 2})
+    >>> _best_of([(None, 0.0, {})])
+    (-1.0, None, {})
+    """
     best_score, best_hit, best_components = -1.0, None, {}
-    for hit in hits:
+    for hit, score, components in scored:
         if hit is None:
             continue
-        score, components = compute_score(entry, hit)
         if score > best_score:
             best_score, best_hit, best_components = score, hit, components
     return best_score, best_hit, best_components
@@ -541,7 +750,8 @@ async def score_entry(
     extra: tuple[str, ...] = (),
     skip_if_incomplete: bool = False,
 ) -> dict:
-    """Pre-check required fields, then query APIs in order.
+    """
+    Pre-check required fields, then query APIs in order.
 
     Parameters
     ----------
@@ -555,18 +765,31 @@ async def score_entry(
         Passed straight through to `check_required_fields`.
         Typically populated from the CLI `--required` option (e.g. `("doi",)`).
     skip_if_incomplete:
-        If *True* and any required fields are missing, skip all API calls and
+        If *True* and any required fields are missing,
+        skip all API calls and
         return a result with `searched=False` immediately.
-        The missing field list is recorded under `missing_fields`.
-        If *False* (default), warn but continue with whatever fields exist.
+        If *False* (default),
+        continue with whatever fields exist and
+        make the API calls anyway.
+        Either way, the missing field list is recorded under `missing_fields`
+        on the returned dict, no warning is logged here.
+        Call `log_incomplete_summary`
+        on the collected results afterwards to report them.
+
+    A blank title is always in `missing_fields`
+    (see `UNIVERSAL_FIELDS`),
+    and is also visible per-hit as `title_missing` in `components`
+    (see `compute_score`),
+    since matching without a title to check against is inherently less trustworthy.
 
     Short-circuit chain (when API calls proceed):
-        1. CrossRef  → stop if DOI hit scores ≥ `DOI_SHORTCIRCUIT_THRESHOLD`
-        2. DBLP      → stop if hit scores ≥ `DBLP_SHORTCIRCUIT_THRESHOLD`
-        3. OpenAlex + Semantic Scholar in parallel (last resort)
+    1. CrossRef: stop if DOI hit scores ≥ `DOI_SHORTCIRCUIT_THRESHOLD`
+    2. DBLP: stop if hit scores ≥ `DBLP_SHORTCIRCUIT_THRESHOLD`
+    3. OpenAlex + Semantic Scholar in parallel (last resort)
 
     Note: short-circuiting trades a small chance of a higher score from a
-    later API for reduced latency.  See module-level note.
+    later API for reduced latency.
+    See module-level note.
     """
     missing = check_required_fields(entry, extra)
 
@@ -576,7 +799,7 @@ async def score_entry(
             "score": None,
             "components": {},
             "best_hit": None,
-            "searched": False,  # API calls were not made
+            "searched": False,
             "not_found": False,
             "short_circuit": False,
             "missing_fields": missing,
@@ -585,13 +808,14 @@ async def score_entry(
 
     # Step 1: CrossRef (best DOI coverage) 
     crossref_hit = await query_crossref(session, entry)
+    crossref_score, crossref_components = 0.0, {}
     if crossref_hit is not None:
-        score, components = compute_score(entry, crossref_hit)
-        if crossref_hit.get("doi_exact") and score >= DOI_SHORTCIRCUIT_THRESHOLD:
+        crossref_score, crossref_components = compute_score(entry, crossref_hit)
+        if crossref_hit.get("doi_exact") and crossref_score >= DOI_SHORTCIRCUIT_THRESHOLD:
             return {
                 "entry": entry,
-                "score": round(score, 3),
-                "components": components,
+                "score": round(crossref_score, 3),
+                "components": crossref_components,
                 "best_hit": crossref_hit,
                 "searched": True,
                 "not_found": False,
@@ -602,13 +826,14 @@ async def score_entry(
 
     # Step 2: DBLP (curated CS metadata, good title matching)
     dblp_hit = await query_dblp(session, entry)
+    dblp_score, dblp_components = 0.0, {}
     if dblp_hit is not None:
-        score, components = compute_score(entry, dblp_hit)
-        if score >= DBLP_SHORTCIRCUIT_THRESHOLD:
+        dblp_score, dblp_components = compute_score(entry, dblp_hit)
+        if dblp_score >= DBLP_SHORTCIRCUIT_THRESHOLD:
             return {
                 "entry": entry,
-                "score": round(score, 3),
-                "components": components,
+                "score": round(dblp_score, 3),
+                "components": dblp_components,
                 "best_hit": dblp_hit,
                 "searched": True,
                 "not_found": False,
@@ -622,10 +847,19 @@ async def score_entry(
         query_openalex(session, entry),
         query_semantic_scholar(session, entry),
     )
-
-    best_score, best_hit, best_components = _pick_best(
-        entry, [crossref_hit, dblp_hit, openalex_hit, ss_hit]
+    openalex_score, openalex_components = (
+        compute_score(entry, openalex_hit) if openalex_hit is not None else (0.0, {})
     )
+    ss_score, ss_components = (
+        compute_score(entry, ss_hit) if ss_hit is not None else (0.0, {})
+    )
+
+    best_score, best_hit, best_components = _best_of([
+        (crossref_hit, crossref_score, crossref_components),
+        (dblp_hit, dblp_score, dblp_components),
+        (openalex_hit, openalex_score, openalex_components),
+        (ss_hit, ss_score, ss_components),
+    ])
 
     return {
         "entry": entry,
