@@ -148,13 +148,98 @@ def title_sim(a: str, b: str) -> float:
     return fuzz.token_sort_ratio(clean(a), clean(b)) / 100
 
 
+def _normalise_author_name(name: str) -> str:
+    """Normalise an author name to 'surname + initials' form.
+
+    Handles both BibTeX conventions ("Family, Given" and "Given Family")
+    and reduces all given names to single-letter initials, so that
+    full and abbreviated forms compare equally.
+
+    >>> _normalise_author_name("John Smith")
+    'smith j'
+    >>> _normalise_author_name("Smith, John")
+    'smith j'
+    >>> _normalise_author_name("J. Smith")
+    'smith j'
+    >>> _normalise_author_name("Smith, J.")
+    'smith j'
+    >>> _normalise_author_name("J.R.R. Tolkien")
+    'tolkien j r r'
+    >>> _normalise_author_name("Smith")
+    'smith'
+    """
+    name = clean(name)
+    if not name:
+        return ""
+
+    if "," in name:                       # "Family, Given"
+        surname, given = (p.strip() for p in name.split(",", 1))
+    else:                                  # "Given Family"
+        tokens = name.split()
+        if len(tokens) == 1:
+            return tokens[0]
+        surname = tokens[-1]
+        given = " ".join(tokens[:-1])
+
+    # Reduce every given-name token to its first letter.
+    given_tokens = re.split(r"[\s.]+", given)
+    initials = " ".join(t[0] for t in given_tokens if t)
+    return f"{surname} {initials}".strip()
+
+
 def author_sim(bib_authors: str, api_authors: list[str]) -> float:
-    """Compare bib 'author' field against a list of strings from API."""
+    """Compare bib 'author' field against a list of strings from API.
+
+    Names are normalised to 'surname + initials' (see
+    ``_normalise_author_name``) and then compared **position-wise**:
+    each author slot is scored independently with :func:`fuzz.ratio`
+    and the per-slot scores are averaged.  Author order matters —
+    the same names in a different order will score poorly.
+
+    Full name and first-name-initial forms are equivalent:
+
+    >>> author_sim("Smith, John", ["John Smith"])
+    1.0
+    >>> author_sim("Smith, J.", ["J. Smith"])
+    1.0
+    >>> author_sim("Smith, John", ["J. Smith"])
+    1.0
+
+    Multiple authors in the same order:
+
+    >>> author_sim("Smith, John and Jones, Barbara", ["John Smith", "Barbara Jones"])
+    1.0
+
+    Wrong order is a fail, not a silent 1.0:
+
+    >>> round(author_sim("Smith, J. and Jones, B.", ["Barbara Jones", "John Smith"]), 2)
+    0.29
+
+    This is intentional as almost the right unordered set of authors is a common hallucinaton error. 
+    
+    Completely different authors are an obvious fail:
+
+    >>> round(author_sim("Smith, John", ["Jones, Barbara"]), 2)
+    0.29
+
+    # TODO may consider a harder cutoff in future, clamping sub-threshold per-slot scores to 0.0:
+    # slot = fuzz.ratio(bib_norm[i], api_norm[i]) / 100
+    # scores.append(slot if slot > 0.8 else 0.0)
+    """
     if not bib_authors or not api_authors:
         return 0.0
-    bib = clean(bib_authors)
-    api = " ".join(clean(a) for a in api_authors)
-    return fuzz.token_set_ratio(bib, api) / 100
+    bib_list = re.split(r"\s+and\s+", bib_authors, flags=re.IGNORECASE)
+    bib_norm = [_normalise_author_name(a) for a in bib_list]
+    api_norm = [_normalise_author_name(a) for a in api_authors]
+
+    max_len = max(len(bib_norm), len(api_norm))
+    scores = []
+    for i in range(max_len):
+        if i < len(bib_norm) and i < len(api_norm):
+            scores.append(fuzz.ratio(bib_norm[i], api_norm[i]) / 100)
+        else:
+            scores.append(0.0)  # missing or extra author
+    return sum(scores) / len(scores)
 
 
 def year_match(bib_year: str, api_year) -> float:
@@ -553,3 +638,7 @@ async def score_entry(
         "missing_fields": missing,
         "skipped": False,
     }
+
+if __name__ == "__main__":
+    import doctest
+    doctest.testmod()
